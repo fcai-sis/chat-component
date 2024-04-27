@@ -1,4 +1,4 @@
-import app from "./app";
+import { httpServer } from "./app";
 import database from "./database";
 import logger from "./core/logger";
 import env, { validateEnvironmentVariables } from "./env";
@@ -10,7 +10,7 @@ validateEnvironmentVariables();
 database()
   .then(() => {
     // Start Express server
-    app.listen(env.PORT, () => {
+    httpServer.listen(env.PORT, () => {
       logger.info(`Server is listening on port ${env.PORT}`);
     });
   })
