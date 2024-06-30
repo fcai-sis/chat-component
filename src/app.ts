@@ -9,9 +9,19 @@ import express, { NextFunction, Request, Response } from "express";
 import router from "./router";
 import { isDev } from "./env";
 import logger from "./core/logger";
-import { Server } from "socket.io";
+import { Server, Socket } from "socket.io";
 import { TokenPayload } from "@fcai-sis/shared-middlewares";
-import { UserModel } from "@fcai-sis/shared-models";
+import {
+  AdminModel,
+  ChatModel,
+  EmployeeModel,
+  InstructorModel,
+  RoleEnum,
+  RoleEnumType,
+  StudentModel,
+  TeachingAssistantModel,
+  UserModel,
+} from "@fcai-sis/shared-models";
 
 // Create Express server
 const app = express();
@@ -88,14 +98,9 @@ io.use(async (socket, next) => {
       process.env.JWT_SECRET as string
     ) as TokenPayload;
 
-    console.log("Decoded token: ", decodedToken);
-
     const { userId } = decodedToken;
 
-    // TODO: Check if the user exists in the database
     const user = await UserModel.findById(userId);
-
-    console.log("User: ", user);
 
     // Attach the decoded payload to the socket
     socket.data.userId = userId;
@@ -108,11 +113,130 @@ io.use(async (socket, next) => {
   }
 });
 
-io.on("connection", (socket) => {
+function getModelFromRole(role: RoleEnumType) {
+  switch (role) {
+    case RoleEnum[0]:
+      return AdminModel;
+    case RoleEnum[1]:
+      return StudentModel;
+    case RoleEnum[2]:
+      return EmployeeModel;
+    case RoleEnum[3]:
+      return InstructorModel;
+    case RoleEnum[4]:
+      return TeachingAssistantModel;
+    default:
+      throw new Error("Invalid role");
+  }
+}
+
+const socketsByUserId = new Map<string, Socket>();
+
+io.on("connection", async (socket) => {
   logger.info(`Socket connected: ${socket.id}`);
 
-  socket.on("message", (data) => {
-    console.log("Message received: ", data);
+  const userId = socket.data.userId;
+  socketsByUserId.set(userId, socket);
+
+  const myChats = await ChatModel.find({
+    $or: [{ user1: userId }, { user2: userId }],
+  });
+
+  console.log("My chats: ", myChats);
+
+  for (const chat of myChats) await socket.join(chat._id.toString());
+
+  socket.rooms.forEach((room) => {
+    console.log(`Socket ${socket.id} is in room ${room}`);
+  });
+
+  socket.on("message", async (data) => {
+    const { message, to } = data;
+    console.log("Received message: ", data);
+
+    const [myUser, targetUser] = await Promise.all([
+      UserModel.findById(userId),
+      UserModel.findById(to),
+    ]);
+
+    if (!myUser || !targetUser) {
+      console.error("Invalid user ID");
+      return;
+    }
+
+    console.log("User ID: ", userId);
+
+    const [me, target] = await Promise.all([
+      getModelFromRole(myUser.role).findOne({ user: userId }),
+      getModelFromRole(targetUser.role).findOne({ user: to }),
+    ]);
+
+    console.log(me, target);
+
+    const newMessage = {
+      message,
+      sender: userId,
+      sentAt: new Date(),
+    };
+
+    const messageToEmit = {
+      ...newMessage,
+      from: {
+        user: userId,
+        fullName: me.fullName,
+        role: myUser.role,
+      },
+      to: {
+        user: to,
+        fullName: target.fullName,
+        role: targetUser.role,
+      },
+    };
+
+    const targetChat = await ChatModel.findOne({
+      $or: [
+        { user1: userId, user2: to },
+        { user1: to, user2: userId },
+      ],
+    });
+
+    console.log("Target chat: ", targetChat);
+
+    if (!targetChat) {
+      const createdChat = new ChatModel({
+        user1: userId,
+        user2: to,
+        messages: [newMessage],
+      });
+
+      await createdChat.save();
+
+      console.log("Created chat: ", createdChat);
+
+      await socket.join(createdChat._id.toString());
+
+      // find the socket of the target user
+      const targetSocket = socketsByUserId.get(to);
+      if (targetSocket) await targetSocket.join(createdChat._id.toString());
+
+      socket.rooms.forEach((room) => {
+        console.log(`Socket ${socket.id} is in room ${room}`);
+      });
+      targetSocket?.rooms.forEach((room) => {
+        console.log(`Socket ${targetSocket?.id} is in room ${room}`);
+      });
+
+      io.to(createdChat._id.toString()).emit("message", messageToEmit);
+
+      return;
+    }
+
+    targetChat.messages.push(newMessage);
+    const updatedTargetChat = await targetChat.save();
+
+    console.log("Updated chat: ", updatedTargetChat);
+
+    io.to(updatedTargetChat._id.toString()).emit("message", messageToEmit);
   });
 
   socket.on("disconnect", () => {
