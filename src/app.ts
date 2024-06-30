@@ -11,6 +11,7 @@ import { isDev } from "./env";
 import logger from "./core/logger";
 import { Server } from "socket.io";
 import { TokenPayload } from "@fcai-sis/shared-middlewares";
+import { UserModel } from "@fcai-sis/shared-models";
 
 // Create Express server
 const app = express();
@@ -64,7 +65,6 @@ app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
   res.status(500).json({ message: "Something broke on our end" });
 });
 
-
 // Socket.io
 const io = new Server(httpServer, {
   cors: {
@@ -72,7 +72,7 @@ const io = new Server(httpServer, {
   },
 });
 
-io.use((socket, next) => {
+io.use(async (socket, next) => {
   const token = socket.handshake.auth.token;
 
   if (!token) {
@@ -83,13 +83,19 @@ io.use((socket, next) => {
   // Verify token
   try {
     // Verify JWT token and decode payload
-    const decodedToken = jwt.verify(token, process.env.JWT_SECRET as string) as TokenPayload;
+    const decodedToken = jwt.verify(
+      token,
+      process.env.JWT_SECRET as string
+    ) as TokenPayload;
 
     console.log("Decoded token: ", decodedToken);
 
     const { userId } = decodedToken;
 
     // TODO: Check if the user exists in the database
+    const user = await UserModel.findById(userId);
+
+    console.log("User: ", user);
 
     // Attach the decoded payload to the socket
     socket.data.userId = userId;
@@ -104,6 +110,10 @@ io.use((socket, next) => {
 
 io.on("connection", (socket) => {
   logger.info(`Socket connected: ${socket.id}`);
+
+  socket.on("message", (data) => {
+    console.log("Message received: ", data);
+  });
 
   socket.on("disconnect", () => {
     logger.info(`Socket disconnected: ${socket.id}`);
